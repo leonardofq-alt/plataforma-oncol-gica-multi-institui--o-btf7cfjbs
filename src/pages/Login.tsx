@@ -74,7 +74,8 @@ export default function Login() {
       }
 
       toast.success('Login institucional realizado com sucesso.')
-      const target = (location.state as any)?.from?.pathname || '/'
+      const fromPath = (location.state as any)?.from?.pathname
+      const target = fromPath && fromPath !== '/login' ? fromPath : '/'
       navigate(target, { replace: true })
     } catch (err: any) {
       setErrorMessage(err.message || 'Erro inesperado na autenticação.')
@@ -101,7 +102,8 @@ export default function Login() {
     }
 
     toast.success('MFA confirmado com nível AAL2!')
-    const target = (location.state as any)?.from?.pathname || '/'
+    const fromPath = (location.state as any)?.from?.pathname
+    const target = fromPath && fromPath !== '/login' ? fromPath : '/'
     navigate(target, { replace: true })
   }
 

@@ -51,6 +51,7 @@ export const TenantProvider = ({ children }: { children: ReactNode }) => {
   const [loading, setLoading] = useState(true)
 
   const fetchTenantData = useCallback(async () => {
+    // If no user is logged in, ensure state is cleaned up
     if (!user) {
       setMemberships([])
       setActiveInstitution(null)
@@ -65,16 +66,38 @@ export const TenantProvider = ({ children }: { children: ReactNode }) => {
     try {
       setLoading(true)
 
-      // Fetch active memberships
-      let { data: memData, error: memError } = await db
-        .from('user_institution_memberships')
-        .select(`
-          id, user_id, institution_id, unit_id, status, starts_at, ends_at,
-          institutions:institution_id (id, name, code, status, created_at, updated_at),
-          units:unit_id (id, institution_id, name, code, status, created_at, updated_at)
-        `)
-        .eq('user_id', user.id)
-        .eq('status', 'active')
+      // Ensure we have a valid session before issuing queries
+      const { data: sessionData } = await supabase.auth.getSession()
+      const currentUserId = sessionData?.session?.user?.id || user.id
+
+      // 1. Fetch active memberships for the user with retry in case session token just attached
+      let memData: any = null
+      let memError: any = null
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const res = await db
+          .from('user_institution_memberships')
+          .select(`
+            id, user_id, institution_id, unit_id, status, starts_at, ends_at,
+            institutions:institution_id (id, name, code, status, created_at, updated_at),
+            units:unit_id (id, institution_id, name, code, status, created_at, updated_at)
+          `)
+          .eq('user_id', currentUserId)
+          .eq('status', 'active')
+
+        memData = res.data
+        memError = res.error
+
+        // If returned rows or explicit error without data, break or retry
+        if (memData && memData.length > 0) break
+        if (memError) {
+          console.warn(`Attempt ${attempt + 1} to load memberships had error:`, memError)
+        }
+        // Small delay if empty, allowing auth token propagation
+        if (attempt < 2 && (!memData || memData.length === 0)) {
+          await new Promise((r) => setTimeout(r, 200))
+        }
+      }
 
       if (memError) {
         console.error('Error fetching memberships:', memError)
@@ -82,18 +105,16 @@ export const TenantProvider = ({ children }: { children: ReactNode }) => {
         return
       }
 
-      // Defensive handling: if joined institutions came back null due to any relationship resolution,
-      // load institutions directly to guarantee activeInstitution is populated.
-      const missingInstIds = (memData || [])
-        .filter((m: any) => !m.institutions && m.institution_id)
-        .map((m: any) => m.institution_id)
+      // Defensive fallback: if joined institutions came back null due to join policy nesting,
+      // load institutions directly to guarantee activeInstitution is fully populated.
+      const rawMemberships = memData || []
+      const instIds = Array.from(
+        new Set(rawMemberships.map((m: any) => m.institution_id).filter(Boolean)),
+      )
 
       let directInstitutionsMap: Record<string, Institution> = {}
-      if (missingInstIds.length > 0) {
-        const { data: instData } = await db
-          .from('institutions')
-          .select('*')
-          .in('id', missingInstIds)
+      if (instIds.length > 0) {
+        const { data: instData } = await db.from('institutions').select('*').in('id', instIds)
 
         if (instData) {
           directInstitutionsMap = instData.reduce((acc: Record<string, Institution>, inst: any) => {
@@ -103,7 +124,21 @@ export const TenantProvider = ({ children }: { children: ReactNode }) => {
         }
       }
 
-      const formattedMemberships: UserInstitutionMembership[] = (memData || []).map((m: any) => ({
+      // Also ensure units map fallback
+      const unitIds = Array.from(new Set(rawMemberships.map((m: any) => m.unit_id).filter(Boolean)))
+      let directUnitsMap: Record<string, Unit> = {}
+      if (unitIds.length > 0) {
+        const { data: unitData } = await db.from('units').select('*').in('id', unitIds)
+
+        if (unitData) {
+          directUnitsMap = unitData.reduce((acc: Record<string, Unit>, u: any) => {
+            acc[u.id] = u
+            return acc
+          }, {})
+        }
+      }
+
+      const formattedMemberships: UserInstitutionMembership[] = rawMemberships.map((m: any) => ({
         id: m.id,
         user_id: m.user_id,
         institution_id: m.institution_id,
@@ -112,7 +147,7 @@ export const TenantProvider = ({ children }: { children: ReactNode }) => {
         starts_at: m.starts_at,
         ends_at: m.ends_at,
         institution: m.institutions || directInstitutionsMap[m.institution_id] || null,
-        unit: m.units,
+        unit: m.units || (m.unit_id ? directUnitsMap[m.unit_id] : null) || null,
       }))
 
       setMemberships(formattedMemberships)
@@ -213,6 +248,12 @@ export const TenantProvider = ({ children }: { children: ReactNode }) => {
       localStorage.setItem(ACTIVE_UNIT_KEY, unitId)
     } else {
       localStorage.removeItem(ACTIVE_UNIT_KEY)
+    }
+
+    // If switching between known memberships, update activeInstitution immediately
+    const targetMembership = memberships.find((m) => m.institution_id === institutionId)
+    if (targetMembership?.institution) {
+      setActiveInstitution(targetMembership.institution)
     }
 
     // Always reset navigation to dashboard index to prevent cross-institution bleed
