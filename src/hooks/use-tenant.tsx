@@ -66,7 +66,7 @@ export const TenantProvider = ({ children }: { children: ReactNode }) => {
       setLoading(true)
 
       // Fetch active memberships
-      const { data: memData, error: memError } = await db
+      let { data: memData, error: memError } = await db
         .from('user_institution_memberships')
         .select(`
           id, user_id, institution_id, unit_id, status, starts_at, ends_at,
@@ -82,6 +82,27 @@ export const TenantProvider = ({ children }: { children: ReactNode }) => {
         return
       }
 
+      // Defensive handling: if joined institutions came back null due to any relationship resolution,
+      // load institutions directly to guarantee activeInstitution is populated.
+      const missingInstIds = (memData || [])
+        .filter((m: any) => !m.institutions && m.institution_id)
+        .map((m: any) => m.institution_id)
+
+      let directInstitutionsMap: Record<string, Institution> = {}
+      if (missingInstIds.length > 0) {
+        const { data: instData } = await db
+          .from('institutions')
+          .select('*')
+          .in('id', missingInstIds)
+
+        if (instData) {
+          directInstitutionsMap = instData.reduce((acc: Record<string, Institution>, inst: any) => {
+            acc[inst.id] = inst
+            return acc
+          }, {})
+        }
+      }
+
       const formattedMemberships: UserInstitutionMembership[] = (memData || []).map((m: any) => ({
         id: m.id,
         user_id: m.user_id,
@@ -90,7 +111,7 @@ export const TenantProvider = ({ children }: { children: ReactNode }) => {
         status: m.status,
         starts_at: m.starts_at,
         ends_at: m.ends_at,
-        institution: m.institutions,
+        institution: m.institutions || directInstitutionsMap[m.institution_id] || null,
         unit: m.units,
       }))
 
